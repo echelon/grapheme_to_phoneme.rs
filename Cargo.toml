@@ -9,7 +9,9 @@ authors = [
 publish = false
 
 [dependencies]
-anyhow = "1.0.31"
 log = "0.4.8"
-numpy = "0.11"
+ndarray = "0.13.1"
+ndarray-npy = "0.5.0"
 
+[dev-dependencies]
+anyhow = "1.0.31"
