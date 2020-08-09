@@ -15,7 +15,7 @@ use std::io::Read;
 use std::{io, fmt};
 use std::error::Error;
 use std::fmt::Formatter;
-use ndarray::Array1;
+use ndarray::{Array1, Axis, Array3};
 use ndarray::Array2;
 use ndarray_npy::{NpzReader, ReadNpzError, read_npy, ReadNpyError};
 use std::collections::HashMap;
@@ -128,12 +128,15 @@ impl Model {
     })
   }
 
-  pub fn encode(&self, grapheme: &str) {
+  pub fn encode(&self, grapheme: &str) -> Array3<f32> {
     let mut chars : Vec<String> = grapheme.chars()
       .map(|c| c.to_string())
       .collect();
 
     chars.push("</s>".to_string());
+
+    // Incredibly useful guide for porting NumPy to Rust ndarray:
+    // https://docs.rs/ndarray/0.13.1/ndarray/doc/ndarray_for_numpy_users/index.html
 
     let encoded : Vec<usize> = chars.iter()
       .map(|c| c.to_string())
@@ -142,13 +145,16 @@ impl Model {
         .unwrap_or(self.unknown_grapheme_idx))
       .collect();
 
-    //x = np.take(self.enc_emb, np.expand_dims(x, 0), axis=0)
+    let shape = (encoded.len(), 256);
+    let mut embeddings : Array2<f32> = Array2::zeros(shape);
 
-    //grapheme.chars()
-    //  .map()
+    for (i, mut row) in embeddings.axis_iter_mut(Axis(0)).enumerate() {
+      let embedding_index = *encoded.get(i).expect("error handling"); // TODO ERROR HANDLING
+      let embedding = self.enc_emb.index_axis(Axis(0), embedding_index);
+      row.assign(&embedding);
+    }
 
-    println!("Chars: {:?}", chars);
-    println!("Encoded: {:?}", encoded);
+    embeddings.insert_axis(Axis(0)) // (1, N, 256)
   }
 }
 
