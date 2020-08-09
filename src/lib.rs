@@ -15,10 +15,12 @@ use std::io::Read;
 use std::{io, fmt};
 use std::error::Error;
 use std::fmt::Formatter;
-use ndarray::{Array1, Axis, Array3};
+use ndarray::Slice;
+use ndarray::{Array1, Axis, Array3, ArrayBase, Array0, ArrayView2};
 use ndarray::Array2;
 use ndarray_npy::{NpzReader, ReadNpzError, read_npy, ReadNpyError};
 use std::collections::HashMap;
+use ndarray::linalg::general_mat_mul;
 
 pub struct Phoneme {
 }
@@ -128,6 +130,45 @@ impl Model {
     })
   }
 
+  pub fn predict(&self, grapheme: &str) -> Vec<String> {
+    let enc = self.encode(grapheme);
+    let enc = self.gru(&enc, grapheme.len() + 1);
+
+    let last_hidden = enc.index_axis(Axis(1), grapheme.len()); // TODO: correct?
+
+    let mut dec = self.dec_emb.index_axis(Axis(0), 2)// 2 = <s>
+      .insert_axis(Axis(0)); // (1, 256)
+
+    let mut h = last_hidden.to_owned();
+
+    let mut preds = Vec::new();
+
+    for i in 0..20 {
+      h = self.grucell(&dec, &h); // TODO: Need to pass decoder, not encoder!
+
+      // For 2d arrays, `dot(&Rhs)` computes the matrix multiplication
+      let logits = h.dot(&self.fc_w.t()) + &self.fc_b;
+      let pred = self.argmax(&logits);
+
+      if pred == 3 {
+        break; // 3 = </s>
+      }
+
+      preds.push(pred);
+
+      dec = self.dec_emb.index_axis(Axis(0), pred)
+        .insert_axis(Axis(0)); // (1, 256)
+    }
+
+    let preds = preds.iter()
+      .map(|idx| self.idx2p.get(&idx)
+        .map(|x| x.clone())
+        .unwrap_or("<unk>".to_string()))
+      .collect();
+
+    preds
+  }
+
   pub fn encode(&self, grapheme: &str) -> Array3<f32> {
     let mut chars : Vec<String> = grapheme.chars()
       .map(|c| c.to_string())
@@ -155,6 +196,123 @@ impl Model {
     }
 
     embeddings.insert_axis(Axis(0)) // (1, N, 256)
+  }
+
+  /*
+    def gru(self, x, steps, w_ih, w_hh, b_ih, b_hh, h0=None):
+        if h0 is None:
+            h0 = np.zeros((x.shape[0], w_hh.shape[1]), np.float32)
+        h = h0  # initial hidden state
+        outputs = np.zeros((x.shape[0], steps, w_hh.shape[1]), np.float32)
+        for t in range(steps):
+            h = self.grucell(x[:, t, :], h, w_ih, w_hh, b_ih, b_hh)  # (b, h)
+            outputs[:, t, ::] = h
+        return outputs
+
+    ----------
+
+  enc = self.gru(enc, len(word) + 1, self.enc_w_ih, self.enc_w_hh,
+       self.enc_b_ih, self.enc_b_hh, h0=np.zeros((1, self.enc_w_hh.shape[-1]), np.float32))
+   */
+  pub fn gru(&self, x: &Array3<f32>, steps: usize) -> Array3<f32> {
+    // Initial hidden state
+    // np.zeros((1, self.enc_w_hh.shape[-1]), np.float32)
+    let mut h : Array2<f32> = Array2::zeros((1, 256));
+    let mut outputs : Array3<f32> = Array3::zeros((1, steps, 256));
+
+    /*for i in 0..steps {
+      let sub_x = x.index_axis(Axis(1), 1);
+      //println!("Subx shape: {:?}", sub_x.shape());
+      h = self.grucell(&sub_x, &h);
+    }*/
+
+    for (_i, mut row) in outputs.axis_iter_mut(Axis(0)).enumerate() {
+      let sub_x = x.index_axis(Axis(1), 1);
+      //println!("Subx shape: {:?}", sub_x.shape());
+      h = self.grucell(&sub_x, &h);
+      row.assign(&h);
+    }
+
+    outputs // (1, N, 256)
+  }
+
+  /*
+
+    def grucell(self, x, h, w_ih, w_hh, b_ih, b_hh):
+        rzn_ih = np.matmul(x, w_ih.T) + b_ih
+        rzn_hh = np.matmul(h, w_hh.T) + b_hh
+
+        rz_ih, n_ih = rzn_ih[:, :rzn_ih.shape[-1] * 2 // 3], rzn_ih[:, rzn_ih.shape[-1] * 2 // 3:]
+        rz_hh, n_hh = rzn_hh[:, :rzn_hh.shape[-1] * 2 // 3], rzn_hh[:, rzn_hh.shape[-1] * 2 // 3:]
+
+        rz = self.sigmoid(rz_ih + rz_hh)
+        r, z = np.split(rz, 2, -1)
+
+        n = np.tanh(n_ih + r * n_hh)
+        h = (1 - z) * n + z * h
+
+        return h
+   */
+  /// x: (1, 256)
+  /// h: (1, 256)
+  pub fn grucell(&self, x: &ArrayView2<f32>, h: &Array2<f32>) -> Array2<f32> {
+    //general_mat_mul()
+    // For 2d arrays, `dot(&Rhs)` computes the matrix multiplication
+    let rzn_ih  = x.dot(&self.enc_w_ih.t()) + &self.enc_b_ih;
+    let rzn_hh  = h.dot(&self.enc_w_hh.t()) + &self.enc_b_hh;
+
+    let t_ih = rzn_ih.shape()[1] * 2 / 3;
+    let rz_ih = rzn_ih.slice_axis(Axis(1), Slice::from(0..t_ih));
+    let n_ih = rzn_ih.slice_axis(Axis(1), Slice::from(t_ih..));
+
+    let t_hh = rzn_hh.shape()[1] * 2 / 3;
+    let rz_hh = rzn_hh.slice_axis(Axis(1), Slice::from(0..t_hh));
+    let n_hh = rzn_hh.slice_axis(Axis(1), Slice::from(t_hh..));
+
+    // TODO: Inefficient. Can't add views.
+    let rz_ih : Array2<f32> = rz_ih.to_owned();
+    let rz_hh : Array2<f32> = rz_hh.to_owned();
+
+    let result = rz_ih + rz_hh;
+    let rz = self.sigmoid(&result);
+
+    let (r, z) = rz.view().split_at(Axis(1), 256); // TODO The math isn't working!
+
+    let n_ih : Array2<f32> = n_ih.to_owned();
+    let n_hh : Array2<f32> = n_hh.to_owned();
+
+    let inner = n_ih + r + n_hh;
+    let n = inner.map(|x: &f32| x.tanh());
+
+    let z = z.into_owned();
+
+    let h = (z.map(|x: &f32| 1.0 - x)) * n + z * h;
+
+    h // output is (1, 256)
+  }
+
+  /// x: (1, 512)
+  /// output: (1, 512)
+  pub fn sigmoid(&self, x: &Array2<f32>) -> Array2<f32> {
+    let x : Array2<f32> = x.map(|x: &f32| 1.0 / (1.0 + (-x).exp()));
+    x
+  }
+
+  // TODO TEST AND DEBUG
+  pub fn argmax(&self, x: &Array2<f32>) -> usize {
+    let mut max : f32 = *x.get((0,0)).expect("todo"); // todo error handling
+    let mut argmax = 0;
+
+    let mut i = 0;
+    for y in x.slice_axis(Axis(1), Slice::from(0..1)) {
+      let y = *y;
+      if y > max {
+        max = y;
+        argmax = i;
+      }
+      i += 1;
+    }
+    argmax
   }
 }
 
@@ -223,7 +381,9 @@ mod tests {
   #[test]
   fn test_encode() -> AnyhowResult<()> {
     let model = Model::read_npy()?;
-    model.encode("test");
+    let predicted = model.predict("test");
+
+    println!("Predicted: {:?}", predicted);
 
     assert_eq!(1,2);
 

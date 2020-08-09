@@ -11,7 +11,9 @@ publish = false
 [dependencies]
 log = "0.4.8"
 ndarray = "0.13.1"
+#ndarray-linalg = "0.12.1"
 ndarray-npy = "0.5.0"
+#ndarray-stats = "0.3.0"
 
 [dev-dependencies]
 anyhow = "1.0.31"
