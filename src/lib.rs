@@ -1,34 +1,45 @@
 // Copyright (c) 2020 Brandon Thomas <bt@brand.io>, <echelon@gmail.com>
+// Based on g2p.py (https://github.com/Kyubyong/g2p), by Kyubyong Park & Jongseok Kim
 
-//#![deny(dead_code)]
+#![deny(dead_code)]
 //#![deny(missing_docs)]
-//#![deny(unreachable_patterns)]
+#![deny(unreachable_patterns)]
 //#![deny(unused_extern_crates)]
 //#![deny(unused_imports)]
-//#![deny(unused_qualifications)]
+#![deny(unused_qualifications)]
 
 //! **Phoneme** is a prediction tool to turn graphemes into phonemes.
 //! It is based on g2p.py
 
-use std::fs::File;
-use std::io::Read;
 use std::{io, fmt};
 use std::error::Error;
 use std::fmt::Formatter;
 use ndarray::Slice;
-use ndarray::{Array1, Axis, Array3, ArrayBase, Array0, ArrayView2};
+use ndarray::{Array1, Axis, Array3, ArrayView2};
 use ndarray::Array2;
-use ndarray_npy::{NpzReader, ReadNpzError, read_npy, ReadNpyError};
+use ndarray_npy::{read_npy, ReadNpyError, NpzReader, ReadNpzError};
 use std::collections::HashMap;
-use ndarray::linalg::general_mat_mul;
+use std::fs::File;
+use std::io::{BufReader, Cursor};
 
-pub struct Phoneme {
-}
+/*const ENC_EMB_MODEL : &'static [u8; 10] = include_bytes!("../model/enc_emb.npy");
+const ENC_W_IH_MODEL : &'static [u8; 10] = include_bytes!("../model/enc_w_ih.npy");
+const ENC_W_HH_MODEL : &'static [u8; 10] = include_bytes!("../model/enc_w_hh.npy");
+const ENC_B_IH_MODEL : &'static [u8; 10] = include_bytes!("../model/enc_b_ih.npy");
+const ENC_B_HH_MODEL : &'static [u8; 10] = include_bytes!("../model/enc_b_hh.npy");
 
+const DEC_EMB_MODEL : &'static [u8; 10] = include_bytes!("../model/dec_emb.npy");
+const DEC_W_IH_MODEL : &'static [u8; 10] = include_bytes!("../model/dec_w_ih.npy");
+const DEC_W_HH_MODEL : &'static [u8; 10] = include_bytes!("../model/dec_w_hh.npy");
+const DEC_B_IH_MODEL : &'static [u8; 10] = include_bytes!("../model/dec_b_ih.npy");
+const DEC_B_HH_MODEL : &'static [u8; 10] = include_bytes!("../model/dec_b_hh.npy");
+
+const FC_W_MODEL : &'static [u8; 10] = include_bytes!("../model/fc_w.npy");
+const FC_B_MODEL : &'static [u8; 10] = include_bytes!("../model/fc_b.npy");*/
+
+const MODEL_NPZ : &'static [u8; 3342208] = include_bytes!("../model/model.npz");
 
 pub struct Model {
-  graphemes: Vec<String>,
-  phonemes: Vec<String>,
   enc_emb : Array2<f32>,
   enc_w_ih : Array2<f32>,
   enc_w_hh : Array2<f32>,
@@ -51,6 +62,88 @@ pub struct Model {
 }
 
 impl Model {
+  pub fn load() -> Result<Self, PhonemeError> {
+    let mut graphemes = Vec::new();
+    graphemes.push("<pad>".to_string());
+    graphemes.push("<unk>".to_string());
+    graphemes.push("</s>".to_string());
+
+    let characters : Vec<String> = "abcdefghijklmnopqrstuvwxyz".chars()
+      .map(|c| c.to_string())
+      .collect();
+
+    graphemes.extend(characters);
+
+    let phones = vec![
+      "AA0", "AA1", "AA2", "AE0", "AE1", "AE2", "AH0", "AH1", "AH2", "AO0",
+      "AO1", "AO2", "AW0", "AW1", "AW2", "AY0", "AY1", "AY2", "B", "CH", "D",
+      "DH", "EH0", "EH1", "EH2", "ER0", "ER1", "ER2", "EY0", "EY1", "EY2", "F",
+      "G", "HH", "IH0", "IH1", "IH2", "IY0", "IY1", "IY2", "JH", "K", "L", "M",
+      "N", "NG", "OW0", "OW1", "OW2", "OY0", "OY1", "OY2", "P", "R", "S", "SH",
+      "T", "TH", "UH0", "UH1", "UH2", "UW", "UW0", "UW1", "UW2", "V", "W", "Y",
+      "Z", "ZH"
+    ];
+
+    let mut phonemes = Vec::new();
+    phonemes.push("<pad>".to_string());
+    phonemes.push("<unk>".to_string());
+    phonemes.push("<s>".to_string());
+    phonemes.push("</s>".to_string());
+    phonemes.extend(phones.iter().map(|p| p.to_string()).collect::<Vec<String>>());
+
+    let mut g2idx : HashMap<String, usize> = HashMap::new();
+    for (i, val) in graphemes.iter().enumerate() {
+      g2idx.insert(val.to_string(), i);
+    }
+
+    let unknown_grapheme_idx = g2idx.get("<unk>")
+      .map(|u| u.clone())
+      .expect("<unk> should be a grapheme"); // TODO error handling
+
+    let mut idx2p : HashMap<usize, String> = HashMap::new();
+    for (i, val) in phonemes.iter().enumerate() {
+      idx2p.insert(i, val.to_string());
+    }
+
+    // NB: Rust doesn't support arrays larger than 32 for read due to
+    // `std::array::LengthAtMost32`, so we convert it to a slice.
+    let cursor = Cursor::new(&MODEL_NPZ[..]);
+    let mut reader = NpzReader::new(cursor)?;
+
+    let enc_emb : Array2<f32> = reader.by_name("enc_emb")?; // (29, 64). (len(graphemes), emb)
+    let enc_w_ih : Array2<f32> = reader.by_name("enc_w_ih")?; // (3*128, 64)
+    let enc_w_hh : Array2<f32> = reader.by_name("enc_w_hh")?; // (3*128, 128)
+    let enc_b_ih : Array1<f32> = reader.by_name("enc_b_ih")?; // (3*128,)
+    let enc_b_hh : Array1<f32> = reader.by_name("enc_b_hh")?; // (3*128,)
+
+    let dec_emb : Array2<f32> = reader.by_name("dec_emb")?; // (74, 64). (len(phonemes), emb)
+    let dec_w_ih : Array2<f32> = reader.by_name("dec_w_ih")?; // (3*128, 64)
+    let dec_w_hh : Array2<f32> = reader.by_name("dec_w_hh")?; // (3*128, 128)
+    let dec_b_ih : Array1<f32> = reader.by_name("dec_b_ih")?; // (3*128,)
+    let dec_b_hh : Array1<f32> = reader.by_name("dec_b_hh")?; // (3*128,)
+
+    let fc_w : Array2<f32> = reader.by_name("fc_w")?; // (74, 128)
+    let fc_b : Array1<f32> = reader.by_name("fc_b")?; // (74,)
+
+    Ok(Self {
+      enc_emb,
+      enc_w_ih,
+      enc_w_hh,
+      enc_b_ih,
+      enc_b_hh,
+      dec_emb,
+      dec_w_ih,
+      dec_w_hh,
+      dec_b_ih,
+      dec_b_hh,
+      fc_w,
+      fc_b,
+      g2idx,
+      idx2p,
+      unknown_grapheme_idx,
+    })
+  }
+
   pub fn read_npy() -> Result<Self, PhonemeError> {
     let mut graphemes = Vec::new();
     graphemes.push("<pad>".to_string());
@@ -94,24 +187,22 @@ impl Model {
       idx2p.insert(i, val.to_string());
     }
 
-    let enc_emb : Array2<f32> = read_npy("data/enc_emb.npy")?; // (29, 64). (len(graphemes), emb)
-    let enc_w_ih : Array2<f32> = read_npy("data/enc_w_ih.npy")?; // (3*128, 64)
-    let enc_w_hh : Array2<f32> = read_npy("data/enc_w_hh.npy")?; // (3*128, 128)
-    let enc_b_ih : Array1<f32> = read_npy("data/enc_b_ih.npy")?; // (3*128,)
-    let enc_b_hh : Array1<f32> = read_npy("data/enc_b_hh.npy")?; // (3*128,)
+    let enc_emb : Array2<f32> = read_npy("model/enc_emb.npy")?; // (29, 64). (len(graphemes), emb)
+    let enc_w_ih : Array2<f32> = read_npy("model/enc_w_ih.npy")?; // (3*128, 64)
+    let enc_w_hh : Array2<f32> = read_npy("model/enc_w_hh.npy")?; // (3*128, 128)
+    let enc_b_ih : Array1<f32> = read_npy("model/enc_b_ih.npy")?; // (3*128,)
+    let enc_b_hh : Array1<f32> = read_npy("model/enc_b_hh.npy")?; // (3*128,)
 
-    let dec_emb : Array2<f32> = read_npy("data/dec_emb.npy")?; // (74, 64). (len(phonemes), emb)
-    let dec_w_ih : Array2<f32> = read_npy("data/dec_w_ih.npy")?; // (3*128, 64)
-    let dec_w_hh : Array2<f32> = read_npy("data/dec_w_hh.npy")?; // (3*128, 128)
-    let dec_b_ih : Array1<f32> = read_npy("data/dec_b_ih.npy")?; // (3*128,)
-    let dec_b_hh : Array1<f32> = read_npy("data/dec_b_hh.npy")?; // (3*128,)
+    let dec_emb : Array2<f32> = read_npy("model/dec_emb.npy")?; // (74, 64). (len(phonemes), emb)
+    let dec_w_ih : Array2<f32> = read_npy("model/dec_w_ih.npy")?; // (3*128, 64)
+    let dec_w_hh : Array2<f32> = read_npy("model/dec_w_hh.npy")?; // (3*128, 128)
+    let dec_b_ih : Array1<f32> = read_npy("model/dec_b_ih.npy")?; // (3*128,)
+    let dec_b_hh : Array1<f32> = read_npy("model/dec_b_hh.npy")?; // (3*128,)
 
-    let fc_w : Array2<f32> = read_npy("data/fc_w.npy")?; // (74, 128)
-    let fc_b : Array1<f32> = read_npy("data/fc_b.npy")?; // (74,)
+    let fc_w : Array2<f32> = read_npy("model/fc_w.npy")?; // (74, 128)
+    let fc_b : Array1<f32> = read_npy("model/fc_b.npy")?; // (74,)
 
     Ok(Self {
-      graphemes,
-      phonemes,
       enc_emb,
       enc_w_ih,
       enc_w_hh,
@@ -170,7 +261,7 @@ impl Model {
     preds
   }
 
-  pub fn encode(&self, grapheme: &str) -> Array3<f32> {
+  pub (crate) fn encode(&self, grapheme: &str) -> Array3<f32> {
     let mut chars : Vec<String> = grapheme.chars()
       .map(|c| c.to_string())
       .collect();
@@ -200,7 +291,7 @@ impl Model {
     embeddings.insert_axis(Axis(0)) // (1, N, 256)
   }
 
-  pub fn gru(&self, x: &Array3<f32>, steps: usize) -> Array3<f32> {
+  pub (crate) fn gru(&self, x: &Array3<f32>, steps: usize) -> Array3<f32> {
     // Initial hidden state
     let mut h : Array2<f32> = Array2::zeros((1, 256));
     let mut outputs : Array3<f32> = Array3::zeros((1, steps, 256));
@@ -216,7 +307,7 @@ impl Model {
 
   /// x: (1, 256)
   /// h: (1, 256)
-  pub fn grucell(&self,
+  pub (crate) fn grucell(&self,
                  x: &ArrayView2<f32>,
                  h: &Array2<f32>,
                  w_ih: &Array2<f32>,
@@ -259,12 +350,12 @@ impl Model {
 
   /// x: (1, 512)
   /// output: (1, 512)
-  pub fn sigmoid(&self, x: &Array2<f32>) -> Array2<f32> {
+  pub (crate) fn sigmoid(&self, x: &Array2<f32>) -> Array2<f32> {
     let x : Array2<f32> = x.map(|x: &f32| 1.0 / (1.0 + (-x).exp()));
     x
   }
 
-  pub fn argmax(&self, x: &Array2<f32>) -> usize {
+  pub (crate) fn argmax(&self, x: &Array2<f32>) -> usize {
     let mut max = f32::MIN;
     let mut argmax = 0;
 
@@ -281,22 +372,22 @@ impl Model {
   }
 }
 
-impl Phoneme {
-  pub fn new() -> Self {
-    Self {}
-  }
-}
-
 #[derive(Debug)]
 pub enum PhonemeError {
   IoError(std::io::Error),
-  ReadNpyError(ndarray_npy::ReadNpyError),
-  ReadNpzError(ndarray_npy::ReadNpzError),
+  ReadNpyError(ReadNpyError),
+  ReadNpzError(ReadNpzError),
 }
 
 impl From<io::Error> for PhonemeError {
   fn from(e: io::Error) -> Self {
     PhonemeError::IoError(e)
+  }
+}
+
+impl From<ReadNpyError> for PhonemeError {
+  fn from(e: ReadNpyError) -> Self {
+    PhonemeError::ReadNpyError(e)
   }
 }
 
@@ -306,11 +397,6 @@ impl From<ReadNpzError> for PhonemeError {
   }
 }
 
-impl From<ReadNpyError> for PhonemeError {
-  fn from(e: ReadNpyError) -> Self {
-    PhonemeError::ReadNpyError(e)
-  }
-}
 
 impl fmt::Display for PhonemeError {
   fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
@@ -322,8 +408,8 @@ impl Error for PhonemeError {
   fn source(&self) -> Option<&(dyn Error + 'static)> {
     match &self {
       PhonemeError::IoError(e) => Some(e),
-      PhonemeError::ReadNpzError(e) => Some(e),
       PhonemeError::ReadNpyError(e) => Some(e),
+      PhonemeError::ReadNpzError(e) => Some(e),
     }
   }
 }
@@ -331,17 +417,11 @@ impl Error for PhonemeError {
 #[cfg(test)]
 mod tests {
   use crate::Model;
-  use anyhow::Result as AnyhowResult;
 
   #[test]
-  fn test_read_npz() -> AnyhowResult<()> {
-    let model = Model::read_npy()?;
-    Ok(())
-  }
-
-  #[test]
-  fn predict() -> AnyhowResult<()> {
-    let model = Model::read_npy()?;
+  fn load() {
+    let model = Model::load()
+      .expect("Should be able to read");
 
     assert_eq!(model.predict("test"),
                vec!["T", "EH1", "S", "T"].iter()
@@ -357,6 +437,26 @@ mod tests {
                vec!["S", "IH0", "M", "F", "OW1", "N", "IY0", "AH0"].iter()
                  .map(|s| s.to_string())
                  .collect::<Vec<String>>());
-    Ok(())
+  }
+
+  #[test]
+  fn predict() {
+    let model = Model::read_npy()
+      .expect("Should be able to read");
+
+    assert_eq!(model.predict("test"),
+               vec!["T", "EH1", "S", "T"].iter()
+                 .map(|s| s.to_string())
+                 .collect::<Vec<String>>());
+
+    assert_eq!(model.predict("zelda"),
+               vec!["Z", "EH1", "L", "D", "AH0"].iter()
+                 .map(|s| s.to_string())
+                 .collect::<Vec<String>>());
+
+    assert_eq!(model.predict("symphonia"),
+               vec!["S", "IH0", "M", "F", "OW1", "N", "IY0", "AH0"].iter()
+                 .map(|s| s.to_string())
+                 .collect::<Vec<String>>());
   }
 }
