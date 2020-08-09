@@ -2,10 +2,10 @@
 // Based on g2p.py (https://github.com/Kyubyong/g2p), by Kyubyong Park & Jongseok Kim
 
 #![deny(dead_code)]
-//#![deny(missing_docs)]
+#![deny(missing_docs)]
 #![deny(unreachable_patterns)]
-//#![deny(unused_extern_crates)]
-//#![deny(unused_imports)]
+#![deny(unused_extern_crates)]
+#![deny(unused_imports)]
 #![deny(unused_qualifications)]
 
 //! **Phoneme** is a prediction tool to turn graphemes into phonemes.
@@ -25,6 +25,7 @@ use std::path::Path;
 
 const MODEL_NPZ : &'static [u8; 3342208] = include_bytes!("../model/model.npz");
 
+/// Holds the g2p model for repeated evaluations.
 pub struct Model {
   enc_emb : Array2<f32>,
   enc_w_ih : Array2<f32>,
@@ -59,23 +60,33 @@ impl Model {
     Self::from_npz_reader(reader)
   }
 
-  /// Read a model from a NumPy '.npz' file.
-  pub fn read_npz_file(filepath: &Path) -> Result<Self, PhonemeError> {
+  /// Load a model from a NumPy '.npz' file.
+  ///
+  /// If you wish to retrain the model (without changing its structure), you can use
+  /// this function to load it.
+  pub fn load_from_npz_file(filepath: &Path) -> Result<Self, PhonemeError> {
     let file = File::open(filepath)?;
     let reader = NpzReader::new(file)?;
     Self::from_npz_reader(reader)
   }
 
-  /// Read a model from a directory containing '.npy' files of the expected names.
+  /// Load a model from a directory containing '.npy' files of the expected names.
+  ///
+  /// If you wish to retrain the model (without changing its structure), you can use
+  /// this function to load it.
   ///
   /// This is provided in the event native NumPy '.npz' serialization fails with this
-  /// library. (I was unable to get 'checkpoint20.npz to work without unzipping and rebundling it.)
+  /// library. (I was unable to get 'checkpoint20.npz to work without unzipping and
+  /// manually rebundling it.)
   ///
-  /// This looks for 'enc_emb.npy', 'enc_w_ih.npy', 'enc_w_hh.npy', 'enc_b_ih.npy',
-  /// 'enc_b_hh.npy', 'dec_emb.npy', 'dec_w_ih.npy', 'dec_w_hh.npy', 'dec_b_ih.npy',
-  /// 'dec_b_hh.npy', 'fc_w.npy', 'fc_b.npy'.  It's a bit heavy-handed, but may help if it's
-  /// difficult to rebundle as 'npz'.
-  pub fn from_npy_directory(directory: &Path) -> Result<Self, PhonemeError> {
+  /// This looks for the individual model weights files 'enc_emb.npy', 'enc_w_ih.npy',
+  /// 'enc_w_hh.npy', 'enc_b_ih.npy', 'enc_b_hh.npy', 'dec_emb.npy', 'dec_w_ih.npy',
+  /// 'dec_w_hh.npy', 'dec_b_ih.npy', 'dec_b_hh.npy', 'fc_w.npy', 'fc_b.npy'.
+  ///
+  /// They must be located together in a single directory.
+  ///
+  /// It's a bit heavy-handed, but may help if it's difficult to rebundle as an 'npz'.
+  pub fn load_from_npy_directory(directory: &Path) -> Result<Self, PhonemeError> {
     let enc_emb : Array2<f32> = read_npy(directory.join("enc_emb.npy"))?; // (29, 64). (len(graphemes), emb)
     let enc_w_ih : Array2<f32> = read_npy(directory.join("enc_w_ih.npy"))?; // (3*128, 64)
     let enc_w_hh : Array2<f32> = read_npy(directory.join("enc_w_hh.npy"))?; // (3*128, 128)
@@ -211,6 +222,21 @@ impl Model {
   }
 
   /// Predict phonemes from single-word grapheme input.
+  ///
+  /// Usage:
+  ///
+  /// ```rust
+  /// extern crate phoneme;
+  /// use phoneme::Model;
+  ///
+  /// let model = Model::load_in_memory()
+  ///   .expect("should load");
+  ///
+  /// assert_eq!(model.predict("test"),
+  ///   vec!["T", "EH1", "S", "T"].iter()
+  ///     .map(|s| s.to_string())
+  ///     .collect::<Vec<String>>());
+  /// ```
   pub fn predict(&self, grapheme: &str) -> Vec<String> {
     let enc = self.encode(grapheme);
     let enc = self.gru(&enc, grapheme.len() + 1);
@@ -362,10 +388,14 @@ impl Model {
   }
 }
 
+/// An error with the library.
 #[derive(Debug)]
 pub enum PhonemeError {
+  /// An IO error.
   IoError(std::io::Error),
+  /// An error reading a set of supplied npy files.
   ReadNpyError(ReadNpyError),
+  /// An error reading an npz bundle.
   ReadNpzError(ReadNpzError),
 }
 
@@ -417,15 +447,15 @@ mod tests {
   }
 
   #[test]
-  fn read_npz_file() {
-    let model = Model::read_npz_file(Path::new("model/model.npz"));
+  fn load_from_npz_file() {
+    let model = Model::load_from_npz_file(Path::new("model/model.npz"));
     assert_eq!(true, model.is_ok());
     let _ = model.expect("should have loaded");
   }
 
   #[test]
-  fn from_npy_directory() {
-    let model = Model::from_npy_directory(Path::new("model/"));
+  fn load_from_npy_directory() {
+    let model = Model::load_from_npy_directory(Path::new("model/"));
     assert_eq!(true, model.is_ok());
     let _ = model.expect("should have loaded");
   }
@@ -452,11 +482,11 @@ mod tests {
   }
 
   #[test]
-  fn predict_lots() {
+  fn repeated_eval() {
     let model = Model::load_in_memory()
       .expect("Should be able to read");
 
-    for _i in 0..100 {
+    for _i in 0..10 {
       assert_eq!(model.predict("test"),
                  vec!["T", "EH1", "S", "T"].iter()
                    .map(|s| s.to_string())
