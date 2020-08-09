@@ -11,31 +11,17 @@
 //! **Phoneme** is a prediction tool to turn graphemes into phonemes.
 //! It is based on g2p.py
 
-use std::{io, fmt};
-use std::error::Error;
-use std::fmt::Formatter;
+use ndarray::Array2;
 use ndarray::Slice;
 use ndarray::{Array1, Axis, Array3, ArrayView2};
-use ndarray::Array2;
 use ndarray_npy::{read_npy, ReadNpyError, NpzReader, ReadNpzError};
 use std::collections::HashMap;
+use std::error::Error;
+use std::fmt::Formatter;
 use std::fs::File;
-use std::io::{BufReader, Cursor};
-
-/*const ENC_EMB_MODEL : &'static [u8; 10] = include_bytes!("../model/enc_emb.npy");
-const ENC_W_IH_MODEL : &'static [u8; 10] = include_bytes!("../model/enc_w_ih.npy");
-const ENC_W_HH_MODEL : &'static [u8; 10] = include_bytes!("../model/enc_w_hh.npy");
-const ENC_B_IH_MODEL : &'static [u8; 10] = include_bytes!("../model/enc_b_ih.npy");
-const ENC_B_HH_MODEL : &'static [u8; 10] = include_bytes!("../model/enc_b_hh.npy");
-
-const DEC_EMB_MODEL : &'static [u8; 10] = include_bytes!("../model/dec_emb.npy");
-const DEC_W_IH_MODEL : &'static [u8; 10] = include_bytes!("../model/dec_w_ih.npy");
-const DEC_W_HH_MODEL : &'static [u8; 10] = include_bytes!("../model/dec_w_hh.npy");
-const DEC_B_IH_MODEL : &'static [u8; 10] = include_bytes!("../model/dec_b_ih.npy");
-const DEC_B_HH_MODEL : &'static [u8; 10] = include_bytes!("../model/dec_b_hh.npy");
-
-const FC_W_MODEL : &'static [u8; 10] = include_bytes!("../model/fc_w.npy");
-const FC_B_MODEL : &'static [u8; 10] = include_bytes!("../model/fc_b.npy");*/
+use std::io::{Cursor, Seek, Read};
+use std::{io, fmt};
+use std::path::Path;
 
 const MODEL_NPZ : &'static [u8; 3342208] = include_bytes!("../model/model.npz");
 
@@ -62,70 +48,48 @@ pub struct Model {
 }
 
 impl Model {
-  pub fn load() -> Result<Self, PhonemeError> {
-    let mut graphemes = Vec::new();
-    graphemes.push("<pad>".to_string());
-    graphemes.push("<unk>".to_string());
-    graphemes.push("</s>".to_string());
-
-    let characters : Vec<String> = "abcdefghijklmnopqrstuvwxyz".chars()
-      .map(|c| c.to_string())
-      .collect();
-
-    graphemes.extend(characters);
-
-    let phones = vec![
-      "AA0", "AA1", "AA2", "AE0", "AE1", "AE2", "AH0", "AH1", "AH2", "AO0",
-      "AO1", "AO2", "AW0", "AW1", "AW2", "AY0", "AY1", "AY2", "B", "CH", "D",
-      "DH", "EH0", "EH1", "EH2", "ER0", "ER1", "ER2", "EY0", "EY1", "EY2", "F",
-      "G", "HH", "IH0", "IH1", "IH2", "IY0", "IY1", "IY2", "JH", "K", "L", "M",
-      "N", "NG", "OW0", "OW1", "OW2", "OY0", "OY1", "OY2", "P", "R", "S", "SH",
-      "T", "TH", "UH0", "UH1", "UH2", "UW", "UW0", "UW1", "UW2", "V", "W", "Y",
-      "Z", "ZH"
-    ];
-
-    let mut phonemes = Vec::new();
-    phonemes.push("<pad>".to_string());
-    phonemes.push("<unk>".to_string());
-    phonemes.push("<s>".to_string());
-    phonemes.push("</s>".to_string());
-    phonemes.extend(phones.iter().map(|p| p.to_string()).collect::<Vec<String>>());
-
-    let mut g2idx : HashMap<String, usize> = HashMap::new();
-    for (i, val) in graphemes.iter().enumerate() {
-      g2idx.insert(val.to_string(), i);
-    }
-
-    let unknown_grapheme_idx = g2idx.get("<unk>")
-      .map(|u| u.clone())
-      .expect("<unk> should be a grapheme"); // TODO error handling
-
-    let mut idx2p : HashMap<usize, String> = HashMap::new();
-    for (i, val) in phonemes.iter().enumerate() {
-      idx2p.insert(i, val.to_string());
-    }
-
+  /// Load the model that comes bundled in-memory with the library.
+  /// This is baked into the library at compile time, and it cannot be updated
+  /// without re-releasing the library.
+  pub fn load_in_memory() -> Result<Self, PhonemeError> {
     // NB: Rust doesn't support arrays larger than 32 for read due to
     // `std::array::LengthAtMost32`, so we convert it to a slice.
     let cursor = Cursor::new(&MODEL_NPZ[..]);
-    let mut reader = NpzReader::new(cursor)?;
+    let reader = NpzReader::new(cursor)?;
+    Self::from_npz_reader(reader)
+  }
 
-    let enc_emb : Array2<f32> = reader.by_name("enc_emb")?; // (29, 64). (len(graphemes), emb)
-    let enc_w_ih : Array2<f32> = reader.by_name("enc_w_ih")?; // (3*128, 64)
-    let enc_w_hh : Array2<f32> = reader.by_name("enc_w_hh")?; // (3*128, 128)
-    let enc_b_ih : Array1<f32> = reader.by_name("enc_b_ih")?; // (3*128,)
-    let enc_b_hh : Array1<f32> = reader.by_name("enc_b_hh")?; // (3*128,)
+  /// Read a model from a NumPy '.npz' file.
+  pub fn read_npz_file(filepath: &Path) -> Result<Self, PhonemeError> {
+    let file = File::open(filepath)?;
+    let reader = NpzReader::new(file)?;
+    Self::from_npz_reader(reader)
+  }
 
-    let dec_emb : Array2<f32> = reader.by_name("dec_emb")?; // (74, 64). (len(phonemes), emb)
-    let dec_w_ih : Array2<f32> = reader.by_name("dec_w_ih")?; // (3*128, 64)
-    let dec_w_hh : Array2<f32> = reader.by_name("dec_w_hh")?; // (3*128, 128)
-    let dec_b_ih : Array1<f32> = reader.by_name("dec_b_ih")?; // (3*128,)
-    let dec_b_hh : Array1<f32> = reader.by_name("dec_b_hh")?; // (3*128,)
+  /// Read a model from a directory containing '.npy' files of the expected names.
+  ///
+  /// This is provided in the event native NumPy '.npz' serialization fails with this
+  /// library. (I was unable to get 'checkpoint20.npz to work without unzipping and rebundling it.)
+  ///
+  /// This looks for 'enc_emb.npy', 'enc_w_ih.npy', 'enc_w_hh.npy', 'enc_b_ih.npy',
+  /// 'enc_b_hh.npy', 'dec_emb.npy', 'dec_w_ih.npy', 'dec_w_hh.npy', 'dec_b_ih.npy',
+  /// 'dec_b_hh.npy', 'fc_w.npy', 'fc_b.npy'.  It's a bit heavy-handed, but may help if it's
+  /// difficult to rebundle as 'npz'.
+  pub fn from_npy_directory(directory: &Path) -> Result<Self, PhonemeError> {
+    let enc_emb : Array2<f32> = read_npy(directory.join("enc_emb.npy"))?; // (29, 64). (len(graphemes), emb)
+    let enc_w_ih : Array2<f32> = read_npy(directory.join("enc_w_ih.npy"))?; // (3*128, 64)
+    let enc_w_hh : Array2<f32> = read_npy(directory.join("enc_w_hh.npy"))?; // (3*128, 128)
+    let enc_b_ih : Array1<f32> = read_npy(directory.join("enc_b_ih.npy"))?; // (3*128,)
+    let enc_b_hh : Array1<f32> = read_npy(directory.join("enc_b_hh.npy"))?; // (3*128,)
+    let dec_emb : Array2<f32> = read_npy(directory.join("dec_emb.npy"))?; // (74, 64). (len(phonemes), emb)
+    let dec_w_ih : Array2<f32> = read_npy(directory.join("dec_w_ih.npy"))?; // (3*128, 64)
+    let dec_w_hh : Array2<f32> = read_npy(directory.join("dec_w_hh.npy"))?; // (3*128, 128)
+    let dec_b_ih : Array1<f32> = read_npy(directory.join("dec_b_ih.npy"))?; // (3*128,)
+    let dec_b_hh : Array1<f32> = read_npy(directory.join("dec_b_hh.npy"))?; // (3*128,)
+    let fc_w : Array2<f32> = read_npy(directory.join("fc_w.npy"))?; // (74, 128)
+    let fc_b : Array1<f32> = read_npy(directory.join("fc_b.npy"))?; // (74,)
 
-    let fc_w : Array2<f32> = reader.by_name("fc_w")?; // (74, 128)
-    let fc_b : Array1<f32> = reader.by_name("fc_b")?; // (74,)
-
-    Ok(Self {
+    Self::from_arrays(
       enc_emb,
       enc_w_ih,
       enc_w_hh,
@@ -138,13 +102,53 @@ impl Model {
       dec_b_hh,
       fc_w,
       fc_b,
-      g2idx,
-      idx2p,
-      unknown_grapheme_idx,
-    })
+    )
   }
 
-  pub fn read_npy() -> Result<Self, PhonemeError> {
+  fn from_npz_reader<T: Read + Seek>(mut npz_reader: NpzReader<T>) -> Result<Self, PhonemeError> {
+    let enc_emb : Array2<f32> = npz_reader.by_name("enc_emb")?; // (29, 64). (len(graphemes), emb)
+    let enc_w_ih : Array2<f32> = npz_reader.by_name("enc_w_ih")?; // (3*128, 64)
+    let enc_w_hh : Array2<f32> = npz_reader.by_name("enc_w_hh")?; // (3*128, 128)
+    let enc_b_ih : Array1<f32> = npz_reader.by_name("enc_b_ih")?; // (3*128,)
+    let enc_b_hh : Array1<f32> = npz_reader.by_name("enc_b_hh")?; // (3*128,)
+    let dec_emb : Array2<f32> = npz_reader.by_name("dec_emb")?; // (74, 64). (len(phonemes), emb)
+    let dec_w_ih : Array2<f32> = npz_reader.by_name("dec_w_ih")?; // (3*128, 64)
+    let dec_w_hh : Array2<f32> = npz_reader.by_name("dec_w_hh")?; // (3*128, 128)
+    let dec_b_ih : Array1<f32> = npz_reader.by_name("dec_b_ih")?; // (3*128,)
+    let dec_b_hh : Array1<f32> = npz_reader.by_name("dec_b_hh")?; // (3*128,)
+    let fc_w : Array2<f32> = npz_reader.by_name("fc_w")?; // (74, 128)
+    let fc_b : Array1<f32> = npz_reader.by_name("fc_b")?; // (74,)
+
+    Self::from_arrays(
+      enc_emb,
+      enc_w_ih,
+      enc_w_hh,
+      enc_b_ih,
+      enc_b_hh,
+      dec_emb,
+      dec_w_ih,
+      dec_w_hh,
+      dec_b_ih,
+      dec_b_hh,
+      fc_w,
+      fc_b,
+    )
+  }
+
+  fn from_arrays(
+    enc_emb : Array2<f32>,
+    enc_w_ih : Array2<f32>,
+    enc_w_hh : Array2<f32>,
+    enc_b_ih : Array1<f32>,
+    enc_b_hh : Array1<f32>,
+    dec_emb : Array2<f32>,
+    dec_w_ih : Array2<f32>,
+    dec_w_hh : Array2<f32>,
+    dec_b_ih : Array1<f32>,
+    dec_b_hh : Array1<f32>,
+    fc_w : Array2<f32>,
+    fc_b : Array1<f32>,
+  ) -> Result<Self, PhonemeError> {
     let mut graphemes = Vec::new();
     graphemes.push("<pad>".to_string());
     graphemes.push("<unk>".to_string());
@@ -187,21 +191,6 @@ impl Model {
       idx2p.insert(i, val.to_string());
     }
 
-    let enc_emb : Array2<f32> = read_npy("model/enc_emb.npy")?; // (29, 64). (len(graphemes), emb)
-    let enc_w_ih : Array2<f32> = read_npy("model/enc_w_ih.npy")?; // (3*128, 64)
-    let enc_w_hh : Array2<f32> = read_npy("model/enc_w_hh.npy")?; // (3*128, 128)
-    let enc_b_ih : Array1<f32> = read_npy("model/enc_b_ih.npy")?; // (3*128,)
-    let enc_b_hh : Array1<f32> = read_npy("model/enc_b_hh.npy")?; // (3*128,)
-
-    let dec_emb : Array2<f32> = read_npy("model/dec_emb.npy")?; // (74, 64). (len(phonemes), emb)
-    let dec_w_ih : Array2<f32> = read_npy("model/dec_w_ih.npy")?; // (3*128, 64)
-    let dec_w_hh : Array2<f32> = read_npy("model/dec_w_hh.npy")?; // (3*128, 128)
-    let dec_b_ih : Array1<f32> = read_npy("model/dec_b_ih.npy")?; // (3*128,)
-    let dec_b_hh : Array1<f32> = read_npy("model/dec_b_hh.npy")?; // (3*128,)
-
-    let fc_w : Array2<f32> = read_npy("model/fc_w.npy")?; // (74, 128)
-    let fc_b : Array1<f32> = read_npy("model/fc_b.npy")?; // (74,)
-
     Ok(Self {
       enc_emb,
       enc_w_ih,
@@ -221,6 +210,7 @@ impl Model {
     })
   }
 
+  /// Predict phonemes from single-word grapheme input.
   pub fn predict(&self, grapheme: &str) -> Vec<String> {
     let enc = self.encode(grapheme);
     let enc = self.gru(&enc, grapheme.len() + 1);
@@ -417,10 +407,32 @@ impl Error for PhonemeError {
 #[cfg(test)]
 mod tests {
   use crate::Model;
+  use std::path::Path;
 
   #[test]
-  fn load() {
-    let model = Model::load()
+  fn load_in_memory() {
+    let model = Model::load_in_memory();
+    assert_eq!(true, model.is_ok());
+    let _ = model.expect("should have loaded");
+  }
+
+  #[test]
+  fn read_npz_file() {
+    let model = Model::read_npz_file(Path::new("model/model.npz"));
+    assert_eq!(true, model.is_ok());
+    let _ = model.expect("should have loaded");
+  }
+
+  #[test]
+  fn from_npy_directory() {
+    let model = Model::from_npy_directory(Path::new("model/"));
+    assert_eq!(true, model.is_ok());
+    let _ = model.expect("should have loaded");
+  }
+
+  #[test]
+  fn predict() {
+    let model = Model::load_in_memory()
       .expect("Should be able to read");
 
     assert_eq!(model.predict("test"),
@@ -440,23 +452,15 @@ mod tests {
   }
 
   #[test]
-  fn predict() {
-    let model = Model::read_npy()
+  fn predict_lots() {
+    let model = Model::load_in_memory()
       .expect("Should be able to read");
 
-    assert_eq!(model.predict("test"),
-               vec!["T", "EH1", "S", "T"].iter()
-                 .map(|s| s.to_string())
-                 .collect::<Vec<String>>());
-
-    assert_eq!(model.predict("zelda"),
-               vec!["Z", "EH1", "L", "D", "AH0"].iter()
-                 .map(|s| s.to_string())
-                 .collect::<Vec<String>>());
-
-    assert_eq!(model.predict("symphonia"),
-               vec!["S", "IH0", "M", "F", "OW1", "N", "IY0", "AH0"].iter()
-                 .map(|s| s.to_string())
-                 .collect::<Vec<String>>());
+    for _i in 0..100 {
+      assert_eq!(model.predict("test"),
+                 vec!["T", "EH1", "S", "T"].iter()
+                   .map(|s| s.to_string())
+                   .collect::<Vec<String>>());
+    }
   }
 }
