@@ -87,7 +87,7 @@ impl Model {
 
     let unknown_grapheme_idx = g2idx.get("<unk>")
       .map(|u| u.clone())
-      .expect("<unk> should be a grapheme");
+      .expect("<unk> should be a grapheme"); // TODO error handling
 
     let mut idx2p : HashMap<usize, String> = HashMap::new();
     for (i, val) in phonemes.iter().enumerate() {
@@ -131,15 +131,11 @@ impl Model {
   }
 
   pub fn predict(&self, grapheme: &str) -> Vec<String> {
-    let enc = self.encode(grapheme); // todo ok
+    let enc = self.encode(grapheme);
     let enc = self.gru(&enc, grapheme.len() + 1);
-
-    //println!("enc: {:?}", enc);
-    //println!("enc.shape: {:?}", enc.shape());
 
     let last_hidden = enc.index_axis(Axis(1), grapheme.len()); // TODO: correct?
 
-    // todo correct
     let mut dec = self.dec_emb.index_axis(Axis(0), 2)// 2 = <s>
       .insert_axis(Axis(0)); // (1, 256)
 
@@ -147,33 +143,13 @@ impl Model {
 
     let mut preds = Vec::new();
 
-    //println!("dec: {:?}", dec);
-
-    for i in 0..20 {
-      //println!("h {}: {:?}", i, h);
-      // TODO: broken after first iter
-      println!("-------------------------------");
-      h = self.grucell(
-        &dec,
-        &h,
-        &self.dec_w_ih,
-        &self.dec_w_hh,
-        &self.dec_b_ih,
-        &self.dec_b_hh
-      );
-
-      //println!("h: {:?}", h);
+    for _i in 0..20 {
+      h = self.grucell(&dec, &h, &self.dec_w_ih, &self.dec_w_hh, &self.dec_b_ih, &self.dec_b_hh);
 
       // For 2d arrays, `dot(&Rhs)` computes the matrix multiplication
       let logits = h.dot(&self.fc_w.t()) + &self.fc_b;
 
-      //println!("logits: {:?}", logits);
-
       let pred = self.argmax(&logits);
-
-      //println!("pred: {:?}", pred);
-
-      //panic!("early out");
 
       if pred == 3 {
         break; // 3 = </s>
@@ -215,7 +191,8 @@ impl Model {
     let mut embeddings : Array2<f32> = Array2::zeros(shape);
 
     for (i, mut row) in embeddings.axis_iter_mut(Axis(0)).enumerate() {
-      let embedding_index = *encoded.get(i).expect("error handling"); // TODO ERROR HANDLING
+      let embedding_index = *encoded.get(i)
+        .expect("error handling"); // TODO ERROR HANDLING
       let embedding = self.enc_emb.index_axis(Axis(0), embedding_index);
       row.assign(&embedding);
     }
@@ -223,62 +200,20 @@ impl Model {
     embeddings.insert_axis(Axis(0)) // (1, N, 256)
   }
 
-  /*
-    def gru(self, x, steps, w_ih, w_hh, b_ih, b_hh, h0=None):
-        if h0 is None:
-            h0 = np.zeros((x.shape[0], w_hh.shape[1]), np.float32)
-        h = h0  # initial hidden state
-        outputs = np.zeros((x.shape[0], steps, w_hh.shape[1]), np.float32)
-        for t in range(steps):
-            h = self.grucell(x[:, t, :], h, w_ih, w_hh, b_ih, b_hh)  # (b, h)
-            outputs[:, t, ::] = h
-        return outputs
-
-    ----------
-
-  enc = self.gru(enc, len(word) + 1, self.enc_w_ih, self.enc_w_hh,
-       self.enc_b_ih, self.enc_b_hh, h0=np.zeros((1, self.enc_w_hh.shape[-1]), np.float32))
-   */
   pub fn gru(&self, x: &Array3<f32>, steps: usize) -> Array3<f32> {
     // Initial hidden state
-    // np.zeros((1, self.enc_w_hh.shape[-1]), np.float32)
     let mut h : Array2<f32> = Array2::zeros((1, 256));
     let mut outputs : Array3<f32> = Array3::zeros((1, steps, 256));
 
-    /*for i in 0..steps {
-      let sub_x = x.index_axis(Axis(1), 1);
-      //println!("Subx shape: {:?}", sub_x.shape());
-      h = self.grucell(&sub_x, &h);
-    }*/
-
     for (i, mut row) in outputs.axis_iter_mut(Axis(1)).enumerate() {
-      let sub_x = x.index_axis(Axis(1), i); // todo ok
+      let sub_x = x.index_axis(Axis(1), i);
       h = self.grucell(&sub_x, &h, &self.enc_w_ih, &self.enc_w_hh, &self.enc_b_ih, &self.enc_b_hh);
-      // TODO h is wrong
-      //println!("h {}: {:?}", i, h);
       row.assign(&h);
     }
 
     outputs // (1, N, 256)
   }
 
-  /*
-
-    def grucell(self, x, h, w_ih, w_hh, b_ih, b_hh):
-        rzn_ih = np.matmul(x, w_ih.T) + b_ih
-        rzn_hh = np.matmul(h, w_hh.T) + b_hh
-
-        rz_ih, n_ih = rzn_ih[:, :rzn_ih.shape[-1] * 2 // 3], rzn_ih[:, rzn_ih.shape[-1] * 2 // 3:]
-        rz_hh, n_hh = rzn_hh[:, :rzn_hh.shape[-1] * 2 // 3], rzn_hh[:, rzn_hh.shape[-1] * 2 // 3:]
-
-        rz = self.sigmoid(rz_ih + rz_hh)
-        r, z = np.split(rz, 2, -1)
-
-        n = np.tanh(n_ih + r * n_hh)
-        h = (1 - z) * n + z * h
-
-        return h
-   */
   /// x: (1, 256)
   /// h: (1, 256)
   pub fn grucell(&self,
@@ -290,63 +225,36 @@ impl Model {
                  b_hh: &Array1<f32>,
 
   ) -> Array2<f32> {
-    //general_mat_mul()
-    // For 2d arrays, `dot(&Rhs)` computes the matrix multiplication
-    let rzn_ih  = x.dot(&w_ih.view().t()) + &b_ih.view(); // todo ok
-    let rzn_hh  = h.dot(&w_hh.view().t()) + &b_hh.view(); // todo(dec) ok on first run
-
-    //println!("rzn_hh {:?}", rzn_hh);
+    let rzn_ih  = x.dot(&w_ih.view().t()) + &b_ih.view();
+    let rzn_hh  = h.dot(&w_hh.view().t()) + &b_hh.view();
 
     let t_ih = rzn_ih.shape()[1] * 2 / 3;
     let rz_ih = rzn_ih.slice_axis(Axis(1), Slice::from(0..t_ih));
-    let n_ih = rzn_ih.slice_axis(Axis(1), Slice::from(t_ih..)); // todo(dec) ok first iter
-
-    //println!("n_ih: {:?}", n_ih);
+    let n_ih = rzn_ih.slice_axis(Axis(1), Slice::from(t_ih..));
 
     let t_hh = rzn_hh.shape()[1] * 2 / 3;
     let rz_hh = rzn_hh.slice_axis(Axis(1), Slice::from(0..t_hh));
-    let n_hh = rzn_hh.slice_axis(Axis(1), Slice::from(t_hh..)); // todo(dec) first iter ok
+    let n_hh = rzn_hh.slice_axis(Axis(1), Slice::from(t_hh..));
 
-    //println!("n_hh: {:?}", n_hh);
-
-    // TODO: Inefficient. Can't add views.
     let rz_ih : Array2<f32> = rz_ih.to_owned();
     let rz_hh : Array2<f32> = rz_hh.to_owned();
 
     let result = rz_ih + rz_hh;
-    let rz = self.sigmoid(&result); // todo(dec) first iter ok
+    let rz = self.sigmoid(&result);
 
-    //println!("rz {:?}", rz);
-    //println!("rz {:?}", rz.shape());
-
-    let (r, z) = rz.view().split_at(Axis(1), 256); // TODO wrong after first iter
-
-    //println!("r: {:?}", r);
-    //println!("r.shape: {:?}", r.shape());
-    //println!("z: {:?}", z);
-    //println!("z.shape: {:?}", z.shape());
+    let (r, z) = rz.view().split_at(Axis(1), 256);
 
     let n_ih : Array2<f32> = n_ih.to_owned();
     let n_hh : Array2<f32> = n_hh.to_owned();
     let r = r.to_owned();
 
-    let inner = n_ih + r * n_hh; // todo(dec) first iter ok
+    let inner = n_ih + r * n_hh;
 
-    //println!("inner: {:?}", inner);
-    //println!("inner.shape: {:?}", inner.shape());
-
-    let n = inner.map(|x: &f32| x.tanh()); // todo(dec) first iter ok
-
-    //println!("n: {:?}", n);
-    //println!("n.shape: {:?}", n.shape());
-
+    let n = inner.map(|x: &f32| x.tanh());
     let z = z.into_owned();
 
-    let h = (z.map(|x: &f32| 1.0 - x)) * n + z * h; // todo(dec) first iter ok
-
-    //println!("h: {:?}", h);
-
-    h // output is (1, 256)
+    // output is (1, 256)
+    (z.map(|x: &f32| 1.0 - x)) * n + z * h
   }
 
   /// x: (1, 512)
@@ -356,12 +264,9 @@ impl Model {
     x
   }
 
-  // TODO TEST AND DEBUG
   pub fn argmax(&self, x: &Array2<f32>) -> usize {
-    //let mut max : f32 = *x.get((0,0)).expect("todo"); // todo error handling
-    //let mut argmax = 0;
     let mut max = f32::MIN;
-    let mut argmax = 99999;
+    let mut argmax = 0;
 
     let mut i = 0;
     for y in x.slice_axis(Axis(1), Slice::from(0..)) {
@@ -380,10 +285,6 @@ impl Phoneme {
   pub fn new() -> Self {
     Self {}
   }
-
-  /*pub fn grapheme_to_phoneme(&self, polyphone: &str) -> String {
-    "".to_string()
-  }*/
 }
 
 #[derive(Debug)]
@@ -439,14 +340,23 @@ mod tests {
   }
 
   #[test]
-  fn test_encode() -> AnyhowResult<()> {
+  fn predict() -> AnyhowResult<()> {
     let model = Model::read_npy()?;
-    let predicted = model.predict("test");
 
-    println!("Predicted: {:?}", predicted);
+    assert_eq!(model.predict("test"),
+               vec!["T", "EH1", "S", "T"].iter()
+                 .map(|s| s.to_string())
+                 .collect::<Vec<String>>());
 
-    assert_eq!(1,2);
+    assert_eq!(model.predict("zelda"),
+               vec!["Z", "EH1", "L", "D", "AH0"].iter()
+                 .map(|s| s.to_string())
+                 .collect::<Vec<String>>());
 
+    assert_eq!(model.predict("symphonia"),
+               vec!["S", "IH0", "M", "F", "OW1", "N", "IY0", "AH0"].iter()
+                 .map(|s| s.to_string())
+                 .collect::<Vec<String>>());
     Ok(())
   }
 }
