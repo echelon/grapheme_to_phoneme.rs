@@ -1,32 +1,3 @@
-grapheme\_to\_phoneme
-=====================
-**grapheme\_to\_phoneme** is a prediction tool to turn graphemes (words) into Arpabet phonemes.
-
-It is based on [Kyubyong Park's and Jongseok Kim's g2p.py](https://github.com/Kyubyong/g2p),
-but only focuses on the prediction model (OOV prediction). CMUDict lookup and hetronym handling
-are best handled by other libraries, such as my
-[Arpabet crate](https://crates.io/crates/arpabet).
-
-Usage
------
-
-```rust
-extern crate grapheme_to_phoneme;
-use grapheme_to_phoneme::Model;
-
-let model = Model::load_in_memory()
-  .expect("should load");
-
-assert_eq!(model.predict("test").expect("should encode"),
-  vec!["T", "EH1", "S", "T"].iter()
-    .map(|s| s.to_string())
-    .collect::<Vec<String>>());
-```
-
-License
--------
-**BSD 4-clause**
-
 Copyright (c) 2020, Brandon Thomas. All rights reserved.
 
 Redistribution and use in source and binary forms, with or without

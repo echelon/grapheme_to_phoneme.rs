@@ -1,19 +1,21 @@
 [package]
-name = "phoneme"
+name = "grapheme_to_phoneme"
+description = "A library for building text to speech applications. Turns graphemes into phonemes."
 edition = "2018"
 version = "0.0.1"
+keywords = [ "grapheme", "phoneme", "TTS", "speech", "arpabet" ]
 authors = [
   "Brandon Thomas <bt@brand.io>",
   "Brandon Thomas <echelon@gmail.com>",
 ]
-publish = false
+license = "BSD-4-Clause"
+repository = "https://github.com/echelon/grapheme_to_phoneme.rs"
+documentation = "https://docs.rs/grapheme_to_phoneme"
 
 [dependencies]
-log = "0.4.8"
 ndarray = "0.13.1"
-#ndarray-linalg = "0.12.1"
 ndarray-npy = "0.5.0"
-#ndarray-stats = "0.3.0"
 
-[dev-dependencies]
-anyhow = "1.0.31"
+[badges]
+travis-ci = { repository = "echelon/grapheme_to_phoneme.rs" }
+

@@ -8,8 +8,27 @@
 #![deny(unused_imports)]
 #![deny(unused_qualifications)]
 
-//! **Phoneme** is a prediction tool to turn graphemes into phonemes.
-//! It is based on g2p.py
+//! **grapheme\_to\_phoneme** is a prediction tool to turn graphemes (words) into Arpabet phonemes.
+//!
+//! It is based on [Kyubyong Park's and Jongseok Kim's g2p.py](https://github.com/Kyubyong/g2p),
+//! but only focuses on the prediction model (OOV prediction). CMUDict lookup and hetronym handling
+//! are best handled by other libraries, such as my
+//! [Arpabet crate](https://crates.io/crates/arpabet).
+//!
+//! Usage:
+//!
+//! ```rust
+//! extern crate grapheme_to_phoneme;
+//! use grapheme_to_phoneme::Model;
+//!
+//! let model = Model::load_in_memory()
+//!   .expect("should load");
+//!
+//! assert_eq!(model.predict("test").expect("should encode"),
+//!   vec!["T", "EH1", "S", "T"].iter()
+//!     .map(|s| s.to_string())
+//!     .collect::<Vec<String>>());
+//! ```
 
 use ndarray::Array2;
 use ndarray::Slice;
@@ -52,7 +71,7 @@ impl Model {
   /// Load the model that comes bundled in-memory with the library.
   /// This is baked into the library at compile time, and it cannot be updated
   /// without re-releasing the library.
-  pub fn load_in_memory() -> Result<Self, PhonemeError> {
+  pub fn load_in_memory() -> Result<Self, GraphToPhoneError> {
     // NB: Rust doesn't support arrays larger than 32 for read due to
     // `std::array::LengthAtMost32`, so we convert it to a slice.
     let cursor = Cursor::new(&MODEL_NPZ[..]);
@@ -64,7 +83,7 @@ impl Model {
   ///
   /// If you wish to retrain the model (without changing its structure), you can use
   /// this function to load it.
-  pub fn load_from_npz_file(filepath: &Path) -> Result<Self, PhonemeError> {
+  pub fn load_from_npz_file(filepath: &Path) -> Result<Self, GraphToPhoneError> {
     let file = File::open(filepath)?;
     let reader = NpzReader::new(file)?;
     Self::from_npz_reader(reader)
@@ -86,7 +105,7 @@ impl Model {
   /// They must be located together in a single directory.
   ///
   /// It's a bit heavy-handed, but may help if it's difficult to rebundle as an 'npz'.
-  pub fn load_from_npy_directory(directory: &Path) -> Result<Self, PhonemeError> {
+  pub fn load_from_npy_directory(directory: &Path) -> Result<Self, GraphToPhoneError> {
     let enc_emb : Array2<f32> = read_npy(directory.join("enc_emb.npy"))?; // (29, 64). (len(graphemes), emb)
     let enc_w_ih : Array2<f32> = read_npy(directory.join("enc_w_ih.npy"))?; // (3*128, 64)
     let enc_w_hh : Array2<f32> = read_npy(directory.join("enc_w_hh.npy"))?; // (3*128, 128)
@@ -116,7 +135,7 @@ impl Model {
     )
   }
 
-  fn from_npz_reader<T: Read + Seek>(mut npz_reader: NpzReader<T>) -> Result<Self, PhonemeError> {
+  fn from_npz_reader<T: Read + Seek>(mut npz_reader: NpzReader<T>) -> Result<Self, GraphToPhoneError> {
     let enc_emb : Array2<f32> = npz_reader.by_name("enc_emb")?; // (29, 64). (len(graphemes), emb)
     let enc_w_ih : Array2<f32> = npz_reader.by_name("enc_w_ih")?; // (3*128, 64)
     let enc_w_hh : Array2<f32> = npz_reader.by_name("enc_w_hh")?; // (3*128, 128)
@@ -159,7 +178,7 @@ impl Model {
     dec_b_hh : Array1<f32>,
     fc_w : Array2<f32>,
     fc_b : Array1<f32>,
-  ) -> Result<Self, PhonemeError> {
+  ) -> Result<Self, GraphToPhoneError> {
     let mut graphemes = Vec::new();
     graphemes.push("<pad>".to_string());
     graphemes.push("<unk>".to_string());
@@ -223,25 +242,29 @@ impl Model {
 
   /// Predict phonemes from single-word grapheme input.
   ///
+  /// To predict multiple words, make multiple calls to this function, once per word. This should
+  /// only be relied upon as a last resort. You should be using CMUDict to look up words and use
+  /// this as a fallback for the OOV case.
+  ///
   /// Usage:
   ///
   /// ```rust
-  /// extern crate phoneme;
-  /// use phoneme::Model;
+  /// extern crate grapheme_to_phoneme;
+  /// use grapheme_to_phoneme::Model;
   ///
   /// let model = Model::load_in_memory()
   ///   .expect("should load");
   ///
-  /// assert_eq!(model.predict("test"),
+  /// assert_eq!(model.predict("test").expect("should encode"),
   ///   vec!["T", "EH1", "S", "T"].iter()
   ///     .map(|s| s.to_string())
   ///     .collect::<Vec<String>>());
   /// ```
-  pub fn predict(&self, grapheme: &str) -> Vec<String> {
-    let enc = self.encode(grapheme);
+  pub fn predict(&self, grapheme: &str) -> Result<Vec<String>, GraphToPhoneError> {
+    let enc = self.encode(grapheme)?;
     let enc = self.gru(&enc, grapheme.len() + 1);
 
-    let last_hidden = enc.index_axis(Axis(1), grapheme.len()); // TODO: correct?
+    let last_hidden = enc.index_axis(Axis(1), grapheme.len());
 
     let mut dec = self.dec_emb.index_axis(Axis(0), 2)// 2 = <s>
       .insert_axis(Axis(0)); // (1, 256)
@@ -274,10 +297,10 @@ impl Model {
         .unwrap_or("<unk>".to_string()))
       .collect();
 
-    preds
+    Ok(preds)
   }
 
-  pub (crate) fn encode(&self, grapheme: &str) -> Array3<f32> {
+  pub (crate) fn encode(&self, grapheme: &str) -> Result<Array3<f32>, GraphToPhoneError> {
     let mut chars : Vec<String> = grapheme.chars()
       .map(|c| c.to_string())
       .collect();
@@ -298,13 +321,17 @@ impl Model {
     let mut embeddings : Array2<f32> = Array2::zeros(shape);
 
     for (i, mut row) in embeddings.axis_iter_mut(Axis(0)).enumerate() {
-      let embedding_index = *encoded.get(i)
-        .expect("error handling"); // TODO ERROR HANDLING
-      let embedding = self.enc_emb.index_axis(Axis(0), embedding_index);
-      row.assign(&embedding);
+      if let Some(embedding_index) = encoded.get(i) {
+        let embedding = self.enc_emb.index_axis(Axis(0), *embedding_index);
+        row.assign(&embedding);
+      } else {
+        let reason = format!("Character at {} could not be encoded", i);
+        return Err(GraphToPhoneError::CouldNotEncodeError(reason));
+      }
     }
 
-    embeddings.insert_axis(Axis(0)) // (1, N, 256)
+    let encoded = embeddings.insert_axis(Axis(0)); // (1, N, 256)
+    Ok(encoded)
   }
 
   pub (crate) fn gru(&self, x: &Array3<f32>, steps: usize) -> Array3<f32> {
@@ -390,46 +417,55 @@ impl Model {
 
 /// An error with the library.
 #[derive(Debug)]
-pub enum PhonemeError {
+pub enum GraphToPhoneError {
   /// An IO error.
   IoError(std::io::Error),
   /// An error reading a set of supplied npy files.
   ReadNpyError(ReadNpyError),
   /// An error reading an npz bundle.
   ReadNpzError(ReadNpzError),
+  /// An error was encountered during encoding.
+  CouldNotEncodeError(String),
 }
 
-impl From<io::Error> for PhonemeError {
+impl From<io::Error> for GraphToPhoneError {
   fn from(e: io::Error) -> Self {
-    PhonemeError::IoError(e)
+    GraphToPhoneError::IoError(e)
   }
 }
 
-impl From<ReadNpyError> for PhonemeError {
+impl From<ReadNpyError> for GraphToPhoneError {
   fn from(e: ReadNpyError) -> Self {
-    PhonemeError::ReadNpyError(e)
+    GraphToPhoneError::ReadNpyError(e)
   }
 }
 
-impl From<ReadNpzError> for PhonemeError {
+impl From<ReadNpzError> for GraphToPhoneError {
   fn from(e: ReadNpzError) -> Self {
-    PhonemeError::ReadNpzError(e)
+    GraphToPhoneError::ReadNpzError(e)
   }
 }
 
 
-impl fmt::Display for PhonemeError {
+impl fmt::Display for GraphToPhoneError {
   fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-    write!(f, "PhonemeError")
+    match self {
+      GraphToPhoneError::IoError(e) => write!(f, "GraphToPhoneError::IoError: {:?}", e),
+      GraphToPhoneError::ReadNpyError(e) => write!(f, "GraphToPhoneError::ReadNpyError: {:?}", e),
+      GraphToPhoneError::ReadNpzError(e) => write!(f, "GraphToPhoneError::ReadNpzError: {:?}", e),
+      GraphToPhoneError::CouldNotEncodeError(r) =>
+        write!(f, "GraphToPhoneError::CouldNotEncodeError: {}", r),
+    }
   }
 }
 
-impl Error for PhonemeError {
+impl Error for GraphToPhoneError {
   fn source(&self) -> Option<&(dyn Error + 'static)> {
     match &self {
-      PhonemeError::IoError(e) => Some(e),
-      PhonemeError::ReadNpyError(e) => Some(e),
-      PhonemeError::ReadNpzError(e) => Some(e),
+      GraphToPhoneError::IoError(e) => Some(e),
+      GraphToPhoneError::ReadNpyError(e) => Some(e),
+      GraphToPhoneError::ReadNpzError(e) => Some(e),
+      GraphToPhoneError::CouldNotEncodeError(_) => None,
     }
   }
 }
@@ -465,17 +501,20 @@ mod tests {
     let model = Model::load_in_memory()
       .expect("Should be able to read");
 
-    assert_eq!(model.predict("test"),
+    assert_eq!(model.predict("test")
+                 .expect("should encode"),
                vec!["T", "EH1", "S", "T"].iter()
                  .map(|s| s.to_string())
                  .collect::<Vec<String>>());
 
-    assert_eq!(model.predict("zelda"),
+    assert_eq!(model.predict("zelda")
+                 .expect("should encode"),
                vec!["Z", "EH1", "L", "D", "AH0"].iter()
                  .map(|s| s.to_string())
                  .collect::<Vec<String>>());
 
-    assert_eq!(model.predict("symphonia"),
+    assert_eq!(model.predict("symphonia")
+                 .expect("should encode"),
                vec!["S", "IH0", "M", "F", "OW1", "N", "IY0", "AH0"].iter()
                  .map(|s| s.to_string())
                  .collect::<Vec<String>>());
@@ -487,7 +526,8 @@ mod tests {
       .expect("Should be able to read");
 
     for _i in 0..10 {
-      assert_eq!(model.predict("test"),
+      assert_eq!(model.predict("test")
+                   .expect("should encode"),
                  vec!["T", "EH1", "S", "T"].iter()
                    .map(|s| s.to_string())
                    .collect::<Vec<String>>());
