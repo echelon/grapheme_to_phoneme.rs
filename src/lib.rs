@@ -131,11 +131,15 @@ impl Model {
   }
 
   pub fn predict(&self, grapheme: &str) -> Vec<String> {
-    let enc = self.encode(grapheme);
+    let enc = self.encode(grapheme); // todo ok
     let enc = self.gru(&enc, grapheme.len() + 1);
+
+    //println!("enc: {:?}", enc);
+    //println!("enc.shape: {:?}", enc.shape());
 
     let last_hidden = enc.index_axis(Axis(1), grapheme.len()); // TODO: correct?
 
+    // todo correct
     let mut dec = self.dec_emb.index_axis(Axis(0), 2)// 2 = <s>
       .insert_axis(Axis(0)); // (1, 256)
 
@@ -143,12 +147,33 @@ impl Model {
 
     let mut preds = Vec::new();
 
+    //println!("dec: {:?}", dec);
+
     for i in 0..20 {
-      h = self.grucell(&dec, &h); // TODO: Need to pass decoder, not encoder!
+      //println!("h {}: {:?}", i, h);
+      // TODO: broken after first iter
+      println!("-------------------------------");
+      h = self.grucell(
+        &dec,
+        &h,
+        &self.dec_w_ih,
+        &self.dec_w_hh,
+        &self.dec_b_ih,
+        &self.dec_b_hh
+      );
+
+      //println!("h: {:?}", h);
 
       // For 2d arrays, `dot(&Rhs)` computes the matrix multiplication
       let logits = h.dot(&self.fc_w.t()) + &self.fc_b;
+
+      //println!("logits: {:?}", logits);
+
       let pred = self.argmax(&logits);
+
+      //println!("pred: {:?}", pred);
+
+      //panic!("early out");
 
       if pred == 3 {
         break; // 3 = </s>
@@ -226,10 +251,11 @@ impl Model {
       h = self.grucell(&sub_x, &h);
     }*/
 
-    for (_i, mut row) in outputs.axis_iter_mut(Axis(0)).enumerate() {
-      let sub_x = x.index_axis(Axis(1), 1);
-      //println!("Subx shape: {:?}", sub_x.shape());
-      h = self.grucell(&sub_x, &h);
+    for (i, mut row) in outputs.axis_iter_mut(Axis(1)).enumerate() {
+      let sub_x = x.index_axis(Axis(1), i); // todo ok
+      h = self.grucell(&sub_x, &h, &self.enc_w_ih, &self.enc_w_hh, &self.enc_b_ih, &self.enc_b_hh);
+      // TODO h is wrong
+      //println!("h {}: {:?}", i, h);
       row.assign(&h);
     }
 
@@ -255,38 +281,70 @@ impl Model {
    */
   /// x: (1, 256)
   /// h: (1, 256)
-  pub fn grucell(&self, x: &ArrayView2<f32>, h: &Array2<f32>) -> Array2<f32> {
+  pub fn grucell(&self,
+                 x: &ArrayView2<f32>,
+                 h: &Array2<f32>,
+                 w_ih: &Array2<f32>,
+                 w_hh: &Array2<f32>,
+                 b_ih: &Array1<f32>,
+                 b_hh: &Array1<f32>,
+
+  ) -> Array2<f32> {
     //general_mat_mul()
     // For 2d arrays, `dot(&Rhs)` computes the matrix multiplication
-    let rzn_ih  = x.dot(&self.enc_w_ih.t()) + &self.enc_b_ih;
-    let rzn_hh  = h.dot(&self.enc_w_hh.t()) + &self.enc_b_hh;
+    let rzn_ih  = x.dot(&w_ih.view().t()) + &b_ih.view(); // todo ok
+    let rzn_hh  = h.dot(&w_hh.view().t()) + &b_hh.view(); // todo(dec) ok on first run
+
+    //println!("rzn_hh {:?}", rzn_hh);
 
     let t_ih = rzn_ih.shape()[1] * 2 / 3;
     let rz_ih = rzn_ih.slice_axis(Axis(1), Slice::from(0..t_ih));
-    let n_ih = rzn_ih.slice_axis(Axis(1), Slice::from(t_ih..));
+    let n_ih = rzn_ih.slice_axis(Axis(1), Slice::from(t_ih..)); // todo(dec) ok first iter
+
+    //println!("n_ih: {:?}", n_ih);
 
     let t_hh = rzn_hh.shape()[1] * 2 / 3;
     let rz_hh = rzn_hh.slice_axis(Axis(1), Slice::from(0..t_hh));
-    let n_hh = rzn_hh.slice_axis(Axis(1), Slice::from(t_hh..));
+    let n_hh = rzn_hh.slice_axis(Axis(1), Slice::from(t_hh..)); // todo(dec) first iter ok
+
+    //println!("n_hh: {:?}", n_hh);
 
     // TODO: Inefficient. Can't add views.
     let rz_ih : Array2<f32> = rz_ih.to_owned();
     let rz_hh : Array2<f32> = rz_hh.to_owned();
 
     let result = rz_ih + rz_hh;
-    let rz = self.sigmoid(&result);
+    let rz = self.sigmoid(&result); // todo(dec) first iter ok
 
-    let (r, z) = rz.view().split_at(Axis(1), 256); // TODO The math isn't working!
+    //println!("rz {:?}", rz);
+    //println!("rz {:?}", rz.shape());
+
+    let (r, z) = rz.view().split_at(Axis(1), 256); // TODO wrong after first iter
+
+    //println!("r: {:?}", r);
+    //println!("r.shape: {:?}", r.shape());
+    //println!("z: {:?}", z);
+    //println!("z.shape: {:?}", z.shape());
 
     let n_ih : Array2<f32> = n_ih.to_owned();
     let n_hh : Array2<f32> = n_hh.to_owned();
+    let r = r.to_owned();
 
-    let inner = n_ih + r + n_hh;
-    let n = inner.map(|x: &f32| x.tanh());
+    let inner = n_ih + r * n_hh; // todo(dec) first iter ok
+
+    //println!("inner: {:?}", inner);
+    //println!("inner.shape: {:?}", inner.shape());
+
+    let n = inner.map(|x: &f32| x.tanh()); // todo(dec) first iter ok
+
+    //println!("n: {:?}", n);
+    //println!("n.shape: {:?}", n.shape());
 
     let z = z.into_owned();
 
-    let h = (z.map(|x: &f32| 1.0 - x)) * n + z * h;
+    let h = (z.map(|x: &f32| 1.0 - x)) * n + z * h; // todo(dec) first iter ok
+
+    //println!("h: {:?}", h);
 
     h // output is (1, 256)
   }
@@ -300,11 +358,13 @@ impl Model {
 
   // TODO TEST AND DEBUG
   pub fn argmax(&self, x: &Array2<f32>) -> usize {
-    let mut max : f32 = *x.get((0,0)).expect("todo"); // todo error handling
-    let mut argmax = 0;
+    //let mut max : f32 = *x.get((0,0)).expect("todo"); // todo error handling
+    //let mut argmax = 0;
+    let mut max = f32::MIN;
+    let mut argmax = 99999;
 
     let mut i = 0;
-    for y in x.slice_axis(Axis(1), Slice::from(0..1)) {
+    for y in x.slice_axis(Axis(1), Slice::from(0..)) {
       let y = *y;
       if y > max {
         max = y;
