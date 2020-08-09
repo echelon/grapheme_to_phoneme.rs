@@ -19,17 +19,22 @@
 //!
 //! ```rust
 //! extern crate grapheme_to_phoneme;
-//! use grapheme_to_phoneme::Model;
 //!
-//! let model = Model::load_in_memory()
+//! let model = grapheme_to_phoneme::Model::load_in_memory()
 //!   .expect("should load");
 //!
-//! assert_eq!(model.predict("test").expect("should encode"),
-//!   vec!["T", "EH1", "S", "T"].iter()
-//!     .map(|s| s.to_string())
-//!     .collect::<Vec<String>>());
+//! assert_eq!(vec!["T", "EH1", "S", "T"],
+//!   model.predict_phonemes("test").expect("should encode")
+//!     .iter()
+//!     .map(|s| s.to_str())
+//!     .collect::<Vec<&str>>());
 //! ```
 
+mod tables;
+
+pub use arpabet;
+
+use crate::tables::build_phoneme_token_arpabet_table;
 use ndarray::Array2;
 use ndarray::Slice;
 use ndarray::{Array1, Axis, Array3, ArrayView2};
@@ -39,8 +44,8 @@ use std::error::Error;
 use std::fmt::Formatter;
 use std::fs::File;
 use std::io::{Cursor, Seek, Read};
-use std::{io, fmt};
 use std::path::Path;
+use std::{io, fmt};
 
 const MODEL_NPZ : &'static [u8; 3342208] = include_bytes!("../model/model.npz");
 
@@ -62,9 +67,44 @@ pub struct Model {
   fc_b : Array1<f32>,
 
   g2idx: HashMap<String, usize>,
-  idx2p: HashMap<usize, String>,
+  idx2p: HashMap<usize, PhonemeToken>,
 
   unknown_grapheme_idx: usize,
+}
+
+/// Typed phonemes.
+#[derive(Clone,Copy,Debug,PartialEq)]
+pub enum PhonemeToken {
+  /// Arpabet phoneme
+  ArpabetPhoneme(arpabet::phoneme::Phoneme),
+  /// Other symbols
+  Token(Token)
+}
+
+/// Symbolic tokens that occur in polyphone constructions.
+#[derive(Clone,Copy,Debug,Eq,PartialEq)]
+pub enum Token {
+  /// Padding: <pad>
+  Pad,
+  /// Unknown: <unk>
+  Unknown,
+  /// Start: <s>
+  Start,
+  /// End: </s>
+  End,
+}
+
+/// An error with the library.
+#[derive(Debug)]
+pub enum GraphToPhoneError {
+  /// An IO error.
+  IoError(std::io::Error),
+  /// An error reading a set of supplied npy files.
+  ReadNpyError(ReadNpyError),
+  /// An error reading an npz bundle.
+  ReadNpzError(ReadNpzError),
+  /// An error was encountered during encoding.
+  CouldNotEncodeError(String),
 }
 
 impl Model {
@@ -190,22 +230,14 @@ impl Model {
 
     graphemes.extend(characters);
 
-    let phones = vec![
-      "AA0", "AA1", "AA2", "AE0", "AE1", "AE2", "AH0", "AH1", "AH2", "AO0",
-      "AO1", "AO2", "AW0", "AW1", "AW2", "AY0", "AY1", "AY2", "B", "CH", "D",
-      "DH", "EH0", "EH1", "EH2", "ER0", "ER1", "ER2", "EY0", "EY1", "EY2", "F",
-      "G", "HH", "IH0", "IH1", "IH2", "IY0", "IY1", "IY2", "JH", "K", "L", "M",
-      "N", "NG", "OW0", "OW1", "OW2", "OY0", "OY1", "OY2", "P", "R", "S", "SH",
-      "T", "TH", "UH0", "UH1", "UH2", "UW", "UW0", "UW1", "UW2", "V", "W", "Y",
-      "Z", "ZH"
-    ];
+    let phones = build_phoneme_token_arpabet_table();
 
     let mut phonemes = Vec::new();
-    phonemes.push("<pad>".to_string());
-    phonemes.push("<unk>".to_string());
-    phonemes.push("<s>".to_string());
-    phonemes.push("</s>".to_string());
-    phonemes.extend(phones.iter().map(|p| p.to_string()).collect::<Vec<String>>());
+    phonemes.push(PhonemeToken::Token(Token::Pad));
+    phonemes.push(PhonemeToken::Token(Token::Unknown));
+    phonemes.push(PhonemeToken::Token(Token::Start));
+    phonemes.push(PhonemeToken::Token(Token::End));
+    phonemes.extend(phones);
 
     let mut g2idx : HashMap<String, usize> = HashMap::new();
     for (i, val) in graphemes.iter().enumerate() {
@@ -213,12 +245,12 @@ impl Model {
     }
 
     let unknown_grapheme_idx = g2idx.get("<unk>")
-      .map(|u| u.clone())
+      .map(|u| u.to_owned())
       .expect("<unk> should be a grapheme"); // TODO error handling
 
-    let mut idx2p : HashMap<usize, String> = HashMap::new();
+    let mut idx2p : HashMap<usize, PhonemeToken> = HashMap::new();
     for (i, val) in phonemes.iter().enumerate() {
-      idx2p.insert(i, val.to_string());
+      idx2p.insert(i, val.clone());
     }
 
     Ok(Self {
@@ -240,6 +272,25 @@ impl Model {
     })
   }
 
+  /// A convenient analog for [Model.predict_phonemes()](Model::predict_phonemes). Use this if your
+  /// system doesn't care about strongly-typed `arpabet.rs` tokens.
+  ///
+  /// ```rust
+  /// extern crate grapheme_to_phoneme;
+  ///
+  /// let model = grapheme_to_phoneme::Model::load_in_memory()
+  ///   .expect("should load");
+  ///
+  /// assert_eq!(vec!["T", "EH1", "S", "T"],
+  ///   model.predict_phonemes_strs("test").expect("should encode"));
+  /// ```
+  pub fn predict_phonemes_strs(&self, grapheme: &str) -> Result<Vec<&'static str>, GraphToPhoneError> {
+    self.predict_phonemes(grapheme)
+      .map(|phonemes| phonemes.iter()
+        .map(|phoneme| phoneme.to_str())
+        .collect::<Vec<&str>>())
+  }
+
   /// Predict phonemes from single-word grapheme input.
   ///
   /// To predict multiple words, make multiple calls to this function, once per word. This should
@@ -250,17 +301,17 @@ impl Model {
   ///
   /// ```rust
   /// extern crate grapheme_to_phoneme;
-  /// use grapheme_to_phoneme::Model;
   ///
-  /// let model = Model::load_in_memory()
+  /// let model = grapheme_to_phoneme::Model::load_in_memory()
   ///   .expect("should load");
   ///
-  /// assert_eq!(model.predict("test").expect("should encode"),
-  ///   vec!["T", "EH1", "S", "T"].iter()
-  ///     .map(|s| s.to_string())
-  ///     .collect::<Vec<String>>());
+  /// assert_eq!(vec!["T", "EH1", "S", "T"],
+  ///   model.predict_phonemes("test").expect("should encode")
+  ///     .iter()
+  ///     .map(|s| s.to_str())
+  ///     .collect::<Vec<&str>>());
   /// ```
-  pub fn predict(&self, grapheme: &str) -> Result<Vec<String>, GraphToPhoneError> {
+  pub fn predict_phonemes(&self, grapheme: &str) -> Result<Vec<PhonemeToken>, GraphToPhoneError> {
     let enc = self.encode(grapheme)?;
     let enc = self.gru(&enc, grapheme.len() + 1);
 
@@ -293,8 +344,8 @@ impl Model {
 
     let preds = preds.iter()
       .map(|idx| self.idx2p.get(&idx)
-        .map(|x| x.clone())
-        .unwrap_or("<unk>".to_string()))
+        .map(|x| x.to_owned())
+        .unwrap_or(PhonemeToken::Token(Token::Unknown)))
       .collect();
 
     Ok(preds)
@@ -415,17 +466,19 @@ impl Model {
   }
 }
 
-/// An error with the library.
-#[derive(Debug)]
-pub enum GraphToPhoneError {
-  /// An IO error.
-  IoError(std::io::Error),
-  /// An error reading a set of supplied npy files.
-  ReadNpyError(ReadNpyError),
-  /// An error reading an npz bundle.
-  ReadNpzError(ReadNpzError),
-  /// An error was encountered during encoding.
-  CouldNotEncodeError(String),
+impl PhonemeToken {
+  /// Get the string representation of the phoneme token.
+  pub fn to_str(&self) -> &'static str {
+    match self {
+      PhonemeToken::ArpabetPhoneme(phoneme) => phoneme.to_str(),
+      PhonemeToken::Token(token) => match token {
+        Token::Pad => "<pad>",
+        Token::Unknown => "<unk>",
+        Token::Start => "<s>",
+        Token::End => "</s>",
+      },
+    }
+  }
 }
 
 impl From<io::Error> for GraphToPhoneError {
@@ -497,27 +550,30 @@ mod tests {
   }
 
   #[test]
-  fn predict() {
+  fn predict_phonemes() {
     let model = Model::load_in_memory()
       .expect("Should be able to read");
 
-    assert_eq!(model.predict("test")
-                 .expect("should encode"),
-               vec!["T", "EH1", "S", "T"].iter()
-                 .map(|s| s.to_string())
-                 .collect::<Vec<String>>());
+    assert_eq!(model.predict_phonemes("test")
+                 .expect("should encode")
+                 .iter()
+                 .map(|p| p.to_str())
+                 .collect::<Vec<&str>>(),
+               vec!["T", "EH1", "S", "T"]);
 
-    assert_eq!(model.predict("zelda")
-                 .expect("should encode"),
-               vec!["Z", "EH1", "L", "D", "AH0"].iter()
-                 .map(|s| s.to_string())
-                 .collect::<Vec<String>>());
+    assert_eq!(model.predict_phonemes("zelda")
+                 .expect("should encode")
+                 .iter()
+                 .map(|p| p.to_str())
+                 .collect::<Vec<&str>>(),
+               vec!["Z", "EH1", "L", "D", "AH0"]);
 
-    assert_eq!(model.predict("symphonia")
-                 .expect("should encode"),
-               vec!["S", "IH0", "M", "F", "OW1", "N", "IY0", "AH0"].iter()
-                 .map(|s| s.to_string())
-                 .collect::<Vec<String>>());
+    assert_eq!(model.predict_phonemes("symphonia")
+                 .expect("should encode")
+                 .iter()
+                 .map(|p| p.to_str())
+                 .collect::<Vec<&str>>(),
+               vec!["S", "IH0", "M", "F", "OW1", "N", "IY0", "AH0"]);
   }
 
   #[test]
@@ -526,11 +582,12 @@ mod tests {
       .expect("Should be able to read");
 
     for _i in 0..10 {
-      assert_eq!(model.predict("test")
-                   .expect("should encode"),
-                 vec!["T", "EH1", "S", "T"].iter()
-                   .map(|s| s.to_string())
-                   .collect::<Vec<String>>());
+      assert_eq!(model.predict_phonemes("test")
+                   .expect("should encode")
+                   .iter()
+                   .map(|p| p.to_str())
+                   .collect::<Vec<&str>>(),
+                 vec!["T", "EH1", "S", "T"]);
     }
   }
 }

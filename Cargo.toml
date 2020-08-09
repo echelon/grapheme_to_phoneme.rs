@@ -2,7 +2,7 @@
 name = "grapheme_to_phoneme"
 description = "A library for building text to speech applications. Turns graphemes into phonemes."
 edition = "2018"
-version = "0.0.2"
+version = "0.0.3"
 keywords = [ "grapheme", "phoneme", "TTS", "speech", "arpabet" ]
 authors = [
   "Brandon Thomas <bt@brand.io>",
@@ -18,6 +18,7 @@ exclude = [
 ]
 
 [dependencies]
+arpabet = "1.0.0"
 ndarray = "0.13.1"
 ndarray-npy = "0.5.0"
 
