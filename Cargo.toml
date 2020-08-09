@@ -11,6 +11,10 @@ authors = [
 license = "BSD-4-Clause"
 repository = "https://github.com/echelon/grapheme_to_phoneme.rs"
 documentation = "https://docs.rs/grapheme_to_phoneme"
+exclude = [
+  "model/*.npy",
+  "reference/*",
+]
 
 [dependencies]
 ndarray = "0.13.1"
